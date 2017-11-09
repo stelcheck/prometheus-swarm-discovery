@@ -6,109 +6,67 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"reflect"
-	"strconv"
+	"net/http"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
+	"github.com/gin-gonic/gin"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/spf13/cobra"
 )
 
 const (
-	implicit     = "implicit"
-	explicit     = "explicit"
-	portLabel    = "prometheus.port"
-	includeLabel = "prometheus.scan"
-	excludeLabel = "prometheus.ignore"
+	enableLabel = "prometheus.enable"
+	portLabel   = "prometheus.port"
+	pathLabel   = "prometheus.path"
 )
 
+type scrapeTask struct {
+	Targets []string
+	Labels  map[string]string
+}
+
+type scrapeTarget struct {
+	Node    swarm.Node
+	Service swarm.Service
+	Task    swarm.Task
+	Image   types.ImageInspect
+	IP      net.IP
+}
+
+type connectedTask struct {
+	task swarm.Task
+	ip   net.IP
+}
+
+// ServerOptions structure for all the cmd line flags
+type ServerOptions struct {
+	logLevel string
+}
+
+// ClientOptions structure for all the cmd line flags
+type ClientOptions struct {
+	logLevel          string
+	serverURL         string
+	prometheusService string
+	output            string
+	interval          int
+}
+
 var logger = logrus.New()
-var options = Options{}
+var serverOptions = ServerOptions{}
+var clientOptions = ClientOptions{}
 
-// allocateIP returns the 3rd last IP in the network range.
-func allocateIP(netCIDR *net.IPNet) string {
-
-	allocIP := net.IP(make([]byte, 4))
-	for i := range netCIDR.IP {
-		allocIP[i] = netCIDR.IP[i] | ^netCIDR.Mask[i]
-	}
-
-	allocIP[3] = allocIP[3] - 2
-	return allocIP.String()
-}
-
-func connectNetworks(networks map[string]swarm.Network, containerID string) error {
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		return err
-	}
-
-	prometheusContainer, err := cli.ContainerInspect(context.Background(), containerID)
-	if err != nil {
-		return err
-	}
-
-	promNetworks := make(map[string]*network.EndpointSettings)
-
-	for _, cntnet := range prometheusContainer.NetworkSettings.Networks {
-		promNetworks[cntnet.NetworkID] = cntnet
-	}
-
-	for id, netwrk := range networks {
-		if _, ok := promNetworks[id]; ok || len(netwrk.IPAMOptions.Configs) == 0 {
-			continue
-		}
-
-		_, netCIDR, err := net.ParseCIDR(netwrk.IPAMOptions.Configs[0].Subnet)
-		if err != nil {
-			logger.Error(err)
-			continue
-		}
-		prometheusIP := allocateIP(netCIDR)
-		logger.Info("Connecting network ", netwrk.Spec.Name, "(", netCIDR.IP, ") to ", containerID, "(", prometheusIP, ")")
-		netconfig := &network.EndpointSettings{
-			IPAMConfig: &network.EndpointIPAMConfig{
-				IPv4Address: prometheusIP,
-			},
-		}
-
-		err = cli.NetworkConnect(context.Background(), netwrk.ID, containerID, netconfig)
-		if err != nil {
-			logger.Error("Could not connect container ", containerID, " to network ", netwrk.ID, ": ", err)
-			continue
-		}
-
-	}
-
-	return nil
-
-}
-
-func writeSDConfig(scrapeTasks []scrapeTask, output string) {
-	jsonScrapeConfig, err := json.MarshalIndent(scrapeTasks, "", "  ")
-	if err != nil {
-		panic(err)
-	}
-
-	logger.Debug("Writing Prometheus config file")
-
-	err = ioutil.WriteFile(output, jsonScrapeConfig, 0644)
-	if err != nil {
-		panic(err)
-	}
-}
-
+// finds the first task running the prometheus container
 func findPrometheusContainer(serviceName string) (string, error) {
 	cli, err := client.NewEnvClient()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
 
 	taskFilters := filters.NewArgs()
@@ -127,242 +85,353 @@ func findPrometheusContainer(serviceName string) (string, error) {
 	return promTasks[0].Status.ContainerStatus.ContainerID, nil
 }
 
-func cleanNetworks(prometheusContainerID string) {
-	cli, err := client.NewEnvClient()
+// finds a service by name
+func findServiceByName(cli *client.Client, serviceName string) (swarm.Service, error) {
 
-	networkFilters := filters.NewArgs()
-	networkFilters.Add("driver", "overlay")
-	networks, err := cli.NetworkList(context.Background(), types.NetworkListOptions{Filters: networkFilters})
+	var service swarm.Service
+
+	serviceFilters := filters.NewArgs()
+	serviceFilters.Add("name", serviceName)
+
+	services, err := cli.ServiceList(context.Background(), types.ServiceListOptions{Filters: serviceFilters})
 	if err != nil {
-		panic(err)
+		return service, err
 	}
 
-	for _, network := range networks {
-		if network.Name == "ingress" {
+	if len(services) == 0 {
+		return service, fmt.Errorf("Could not find service %s", serviceName)
+	}
+
+	service = services[0]
+
+	return service, nil
+}
+
+func findServicesByLabel(cli *client.Client, label string) ([]swarm.Service, error) {
+
+	serviceFilters := filters.NewArgs()
+	serviceFilters.Add("label", label)
+
+	return cli.ServiceList(context.Background(), types.ServiceListOptions{Filters: serviceFilters})
+}
+
+func findServiceTasks(cli *client.Client, serviceID string) ([]swarm.Task, error) {
+
+	taskFilters := filters.NewArgs()
+	// should we remove filter these?
+	// https://github.com/ContainerSolutions/prometheus-swarm-discovery/pull/1#issuecomment-292808012
+	// taskFilters.Add("desired-state", string(swarm.TaskStateRunning))
+	taskFilters.Add("service", serviceID)
+	return cli.TaskList(context.Background(), types.TaskListOptions{Filters: taskFilters})
+}
+
+func findAllNodesMap(cli *client.Client) (map[string]swarm.Node, error) {
+	nodeMap := make(map[string]swarm.Node)
+
+	nodeFilters := filters.NewArgs()
+	nodes, err := cli.NodeList(context.Background(), types.NodeListOptions{Filters: nodeFilters})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, node := range nodes {
+		nodeMap[node.ID] = node
+	}
+
+	return nodeMap, nil
+}
+
+func getNetworkIDsMap(service swarm.Service) map[string]bool {
+	networkIDs := make(map[string]bool)
+
+	for _, virtualIP := range service.Endpoint.VirtualIPs {
+		networkIDs[virtualIP.NetworkID] = true
+	}
+
+	return networkIDs
+}
+
+func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
+
+	cli, err := client.NewEnvClient()
+	if err != nil {
+		return nil, err
+	}
+
+	prometheusService, err := findServiceByName(cli, prometheusServiceName)
+	if err != nil {
+		return nil, err
+	}
+
+	prometheusNetworkIDs := getNetworkIDsMap(prometheusService)
+
+	prometheusEnabledServices, err := findServicesByLabel(cli, string(enableLabel)+"=true")
+	if err != nil {
+		return nil, err
+	}
+
+	scrapeTargets := make([]scrapeTarget, 0)
+
+	nodes, err := findAllNodesMap(cli)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, service := range prometheusEnabledServices {
+
+		image, _, err := cli.ImageInspectWithRaw(context.Background(), service.Spec.TaskTemplate.ContainerSpec.Image)
+		if err != nil {
+			logger.Error(err)
 			continue
 		}
 
-		if len(network.Containers) == 1 && reflect.ValueOf(network.Containers).MapKeys()[0].String() == prometheusContainerID {
-			logger.Info("Network ", network.Name, " contains only the Prometheus container. Disconnecting and removing network.")
-			cli.NetworkDisconnect(context.Background(), network.ID, prometheusContainerID, true)
-			if err != nil {
-				logger.Error(err)
+		tasks, err := findServiceTasks(cli, service.ID)
+		if err != nil {
+			logger.Error(err)
+			continue
+		}
+
+		connectedTasks := getConnectedTasks(tasks, prometheusNetworkIDs)
+
+		for _, connectedTask := range connectedTasks {
+
+			target := scrapeTarget{
+				Node:    nodes[connectedTask.task.NodeID],
+				Service: service,
+				Task:    connectedTask.task,
+				Image:   image,
+				IP:      connectedTask.ip,
 			}
-			err := cli.NetworkRemove(context.Background(), network.ID)
-			if err != nil {
-				logger.Error(err)
-			}
+			scrapeTargets = append(scrapeTargets, target)
 		}
 	}
+	return scrapeTargets, nil
 
 }
 
-type scrapeService struct {
-	ServiceName string
-	scrapeTasks scrapeTask
+func buildLabels(target scrapeTarget) map[string]string {
+
+	labels := map[string]string{
+		model.JobLabel: target.Service.Spec.Name,
+
+		model.MetaLabelPrefix + "swarm_task_name":          fmt.Sprintf("%s.%d", target.Service.Spec.Name, target.Task.Slot),
+		model.MetaLabelPrefix + "swarm_task_desired_state": string(target.Task.DesiredState),
+
+		model.MetaLabelPrefix + "swarm_service_name": target.Service.Spec.Name,
+
+		model.MetaLabelPrefix + "swarm_node_hostname": target.Node.Description.Hostname,
+	}
+
+	if path, ok := target.Service.Spec.Labels[pathLabel]; ok {
+		labels[model.MetricsPathLabel] = path
+	}
+
+	for k, v := range target.Image.ContainerConfig.Labels {
+		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"swarm_label_"+k)] = v
+	}
+
+	for k, v := range target.Service.Spec.Labels {
+		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"swarm_label_"+k)] = v
+	}
+
+	for k, v := range target.Task.Labels {
+		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"swarm_label_"+k)] = v
+	}
+
+	for k, v := range target.Task.Spec.ContainerSpec.Labels {
+		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"swarm_label_"+k)] = v
+	}
+
+	return labels
 }
 
-type scrapeTask struct {
-	Targets []string
-	Labels  map[string]string
+func buildTargets(target scrapeTarget) []string {
+	var endpoint = target.IP.String()
+
+	if port, ok := target.Service.Spec.Labels[portLabel]; ok {
+		endpoint = endpoint + ":" + port
+	}
+
+	return []string{endpoint}
 }
 
-// collectPorts builds a map of ports collected from container exposed ports and/or from ports defined
-// as container labels
-func collectPorts(task swarm.Task, serviceIDMap map[string]swarm.Service) map[int]struct{} {
-
-	ports := make(map[int]struct{})
-
-	// collects port defined in the container labels
-	if portstr, ok := task.Spec.ContainerSpec.Labels[portLabel]; ok {
-		if port, err := strconv.Atoi(portstr); err == nil {
-			ports[port] = struct{}{}
+func buildScrapeTasks(scrapeTargets []scrapeTarget) []scrapeTask {
+	tasks := make([]scrapeTask, 0)
+	for _, target := range scrapeTargets {
+		task := scrapeTask{
+			Targets: buildTargets(target),
+			Labels:  buildLabels(target),
 		}
+		tasks = append(tasks, task)
 	}
-
-	// collects exposed ports
-	for _, port := range serviceIDMap[task.ServiceID].Spec.EndpointSpec.Ports {
-		ports[int(port.TargetPort)] = struct{}{}
-	}
-
-	return ports
+	return tasks
 }
 
-func collectIPs(task swarm.Task) ([]net.IP, map[string]swarm.Network) {
+func discoverSwarm(prometheusServiceName string) ([]scrapeTask, error) {
 
-	var containerIPs []net.IP
-	taskNetworks := make(map[string]swarm.Network)
+	scrapeTargetsMap, err := getScrapeTargets(prometheusServiceName)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildScrapeTasks(scrapeTargetsMap), nil
+}
+
+func getTaskIPs(task swarm.Task) map[string][]net.IP {
+	ipsInNetwork := make(map[string][]net.IP)
 
 	for _, netatt := range task.NetworksAttachments {
+
 		if netatt.Network.Spec.Name == "ingress" || netatt.Network.DriverState.Name != "overlay" {
 			continue
 		}
 
+		ips := make([]net.IP, 0)
 		for _, ipcidr := range netatt.Addresses {
 			ip, _, err := net.ParseCIDR(ipcidr)
 			if err != nil {
 				logger.Error(err)
 				continue
 			}
-
-			containerIPs = append(containerIPs, ip)
+			ips = append(ips, ip)
 		}
-		taskNetworks[netatt.Network.ID] = netatt.Network
+
+		if len(ips) > 0 {
+			ipsInNetwork[netatt.Network.ID] = ips
+		}
 	}
 
-	return containerIPs, taskNetworks
+	return ipsInNetwork
+
 }
 
-func taskLabels(task swarm.Task, serviceIDMap map[string]swarm.Service) map[string]string {
-	service := serviceIDMap[task.ServiceID]
-	labels := map[string]string{
-		model.JobLabel: service.Spec.Name,
-
-		model.MetaLabelPrefix + "docker_task_name":          task.Name,
-		model.MetaLabelPrefix + "docker_task_desired_state": string(task.DesiredState),
-	}
-	for k, v := range task.Labels {
-		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"docker_task_label_"+k)] = v
-	}
-	for k, v := range service.Spec.Labels {
-		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"docker_service_label_"+k)] = v
-	}
-	return labels
-}
-
-func discoverSwarm(prometheusContainerID string, outputFile string, discoveryType string) {
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		panic(err)
-	}
-
-	services, err := cli.ServiceList(context.Background(), types.ServiceListOptions{})
-	if err != nil {
-		panic(err)
-	}
-	serviceIDMap := make(map[string]swarm.Service)
-	for _, service := range services {
-		serviceIDMap[service.ID] = service
-	}
-
-	taskFilters := filters.NewArgs()
-	taskFilters.Add("desired-state", string(swarm.TaskStateRunning))
-	tasks, err := cli.TaskList(context.Background(), types.TaskListOptions{Filters: taskFilters})
-	if err != nil {
-		panic(err)
-	}
-
-	var scrapeTasks []scrapeTask
-	allNetworks := make(map[string]swarm.Network)
+func getConnectedTasks(tasks []swarm.Task, networkIDs map[string]bool) []connectedTask {
+	connectedTasks := make([]connectedTask, 0)
 
 	for _, task := range tasks {
+		ips := getTaskIPs(task)
 
-		if discoveryType == implicit {
-			if _, ok := task.Spec.ContainerSpec.Labels[excludeLabel]; ok {
-				logger.Debugf("Task %s ignored by Prometheus", task.ID)
-				continue
-			}
-		} else if discoveryType == explicit {
-			if _, ok := task.Spec.ContainerSpec.Labels[includeLabel]; ok {
-				logger.Debugf("Task %s should be scanned by Prometheus", task.ID)
-			} else {
-				continue
+		for taskNetworkID, taskIPs := range ips {
+			if _, ok := networkIDs[taskNetworkID]; ok {
+				connectedTasks = append(connectedTasks, connectedTask{
+					task: task,
+					ip:   taskIPs[0],
+				})
 			}
 		}
-
-		ports := collectPorts(task, serviceIDMap)
-		containerIPs, taskNetworks := collectIPs(task)
-		var taskEndpoints []string
-
-		for k, v := range taskNetworks {
-			allNetworks[k] = v
-		}
-
-		// if exposed ports are found, or ports defined through labels, add them to the Prometheus target.
-		// if not, add only the container IP as a target, and Prometheus will use the default port (80).
-		for _, ip := range containerIPs {
-			if len(ports) > 0 {
-				for port := range ports {
-					taskEndpoints = append(taskEndpoints, fmt.Sprintf("%s:%d", ip.String(), port))
-				}
-			} else {
-				taskEndpoints = append(taskEndpoints, ip.String())
-			}
-		}
-
-		logger.Debugf("Found task %s with IPs %s", task.ID, taskEndpoints)
-
-		scrapetask := scrapeTask{
-			Targets: taskEndpoints,
-			Labels:  taskLabels(task, serviceIDMap),
-		}
-
-		scrapeTasks = append(scrapeTasks, scrapetask)
 	}
 
-	err = connectNetworks(allNetworks, prometheusContainerID)
-	if err != nil {
-		logger.Error("Could not connect container ,", prometheusContainerID, ": ", err)
-	}
-	writeSDConfig(scrapeTasks, outputFile)
+	return connectedTasks
 }
 
-func discoveryProcess(cmd *cobra.Command, args []string) {
+func writeSDConfig(scrapeTasks []scrapeTask, output string) {
+	jsonScrapeConfig, err := json.MarshalIndent(scrapeTasks, "", "  ")
+	if err != nil {
+		panic(err)
+	}
 
-	level, err := logrus.ParseLevel(options.logLevel)
+	logger.Info("Writing Prometheus config file")
+
+	err = ioutil.WriteFile(output, jsonScrapeConfig, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func discoveryServer(cmd *cobra.Command, args []string) {
+
+	level, err := logrus.ParseLevel(serverOptions.logLevel)
 	if err != nil {
 		logger.Fatal(err)
 	}
 	logger.Level = level
 
-	if options.discovery != implicit && options.discovery != explicit {
-		logger.Fatal("Invalid discovery type: ", options.discovery)
-	}
-
-	logger.Info("Starting service discovery process using Prometheus service [", options.prometheusService, "]")
-
-	for {
-		time.Sleep(time.Duration(options.discoveryInterval) * time.Second)
-		prometheusContainerID, err := findPrometheusContainer(options.prometheusService)
+	r := gin.Default()
+	r.GET("/targets/:prometheusService", func(c *gin.Context) {
+		prometheusService := c.Param("prometheusService")
+		scrapeTasks, err := discoverSwarm(prometheusService)
 		if err != nil {
-			logger.Warn(err)
-			continue
+			logger.Error(err)
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
 		}
 
-		discoverSwarm(prometheusContainerID, options.output, options.discovery)
-		if options.clean {
-			cleanNetworks(prometheusContainerID)
+		c.JSON(200, scrapeTasks)
+	})
+	r.GET("/debug/:prometheusService", func(c *gin.Context) {
+		prometheusService := c.Param("prometheusService")
+		scrapeTasks, err := getScrapeTargets(prometheusService)
+		if err != nil {
+			logger.Error(err)
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
 		}
-	}
+
+		c.JSON(200, scrapeTasks)
+	})
+
+	r.Run() // listen and serve on 0.0.0.0:8080
 }
 
-// Options structure for all the cmd line flags
-type Options struct {
-	prometheusService string
-	discoveryInterval int
-	discovery         string
-	logLevel          string
-	output            string
-	clean             bool
+func getServerTargets(serverClient *http.Client, serverURL string, prometheusService string, target interface{}) error {
+
+	var url = serverURL + "/targets/" + prometheusService
+	logger.Infof("Getting targets from %s", url)
+
+	resp, err := serverClient.Get(url)
+	if err != nil {
+		logger.Error(err)
+		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func discoveryClient(cmd *cobra.Command, args []string) {
+	var serverClient = &http.Client{Timeout: 10 * time.Second}
+
+	level, err := logrus.ParseLevel(clientOptions.logLevel)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	logger.Level = level
+
+	for {
+		targets := make([]scrapeTask, 0)
+		err := getServerTargets(serverClient, clientOptions.serverURL, clientOptions.prometheusService, &targets)
+		if err != nil {
+			logger.Error(err)
+			return
+		}
+
+		writeSDConfig(targets, clientOptions.output)
+		time.Sleep(time.Duration(clientOptions.interval) * time.Second)
+	}
 }
 
 func main() {
 
-	var cmdDiscover = &cobra.Command{
-		Use:   "discover",
-		Short: "Starts Swarm service discovery",
-		Run:   discoveryProcess,
+	var rootCmd = &cobra.Command{Use: "prometheus-swarm-discovery"}
+
+	var cmdServer = &cobra.Command{
+		Use:   "server",
+		Short: "Starts Swarm service server",
+		Run:   discoveryServer,
 	}
+	cmdServer.Flags().StringVarP(&serverOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
+	rootCmd.AddCommand(cmdServer)
 
-	cmdDiscover.Flags().StringVarP(&options.prometheusService, "prometheus", "p", "prometheus", "Name of the Prometheus service")
-	cmdDiscover.Flags().IntVarP(&options.discoveryInterval, "interval", "i", 30, "The interval, in seconds, at which the discovery process is kicked off")
-	cmdDiscover.Flags().StringVarP(&options.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
-	cmdDiscover.Flags().StringVarP(&options.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
-	cmdDiscover.Flags().BoolVarP(&options.clean, "clean", "c", true, "Disconnects unused networks from the Prometheus container, and deletes them.")
-	cmdDiscover.Flags().StringVarP(&options.discovery, "discovery", "d", "implicit", "Discovery time: implicit or explicit. Implicit scans all the services found while explicit scans only labeled services.")
+	var cmdClient = &cobra.Command{
+		Use:   "client",
+		Short: "Starts Swarm service client",
+		Run:   discoveryClient,
+	}
+	cmdClient.Flags().StringVarP(&clientOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
+	cmdClient.Flags().StringVarP(&clientOptions.serverURL, "server", "s", "http://prometheus-swarm-discovery:8080", "The prometheus-swarm-discovery server to ask for targets")
+	cmdClient.Flags().StringVarP(&clientOptions.prometheusService, "prometheus", "p", "prometheus", "Name of the Prometheus service")
+	cmdClient.Flags().StringVarP(&clientOptions.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
+	cmdClient.Flags().IntVarP(&clientOptions.interval, "interval", "i", 30, "The interval, in seconds, at which the discovery process is kicked off")
+	rootCmd.AddCommand(cmdClient)
 
-	var rootCmd = &cobra.Command{Use: "promswarm"}
-	rootCmd.AddCommand(cmdDiscover)
 	rootCmd.Execute()
-
 }

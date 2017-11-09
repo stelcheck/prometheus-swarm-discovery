@@ -15,4 +15,7 @@ LABEL maintainer="javier.mendiaracanardo@telefonica.com"
 
 COPY --from=build /go/bin/prometheus-swarm-discovery /prometheus-swarm-discovery
 
-ENTRYPOINT [ "/prometheus-swarm-discovery", "discover" ] 
+EXPOSE 8080
+
+ENTRYPOINT [ "/prometheus-swarm-discovery"]
+CMD ["server"] 

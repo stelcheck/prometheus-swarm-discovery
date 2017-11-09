@@ -1,37 +1,55 @@
 version: '3.3'
 
 services:
-  swarm-discover:
+  swarm-discovery-server:
     image: jmendiara/prometheus-swarm-discovery
-    command: ["-i", "5", "-o", "/swarm-endpoints/swarm-endpoints.json", "-p" , "prometheus_prometheus"]
+    ports:
+      - '8080:8080'
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - swarm-endpoints:/swarm-endpoints/
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     deploy:
-      labels:
-       - prometheus.disable=true
       placement:
         constraints:
           - node.role == manager
+
+  swarm-discovery-client:
+    image: jmendiara/prometheus-swarm-discovery
+    command: 
+      - client
+      - -i=5
+      - -s=http://swarm-discovery-server:8080
+      - -o=/swarm-endpoints/swarm-endpoints.json
+      - -p=pro_prometheus
+    volumes:
+      - swarm-endpoints:/swarm-endpoints/
+    deploy:
+      labels:
+        prometheus.enable: "true"
+        prometheus.port: "9090" # optional (defaults to prometheus defaults := "80")
+        prometheus.path: "/metrics" # optional (defaults to prometheus defaults := "/metrics")
+      placement:
+        constraints:
+          - node.role == manager
+
   prometheus:
     image: prom/prometheus:v1.8.2
     ports:
       - '9090:9090'
-   
     volumes:
       - swarm-endpoints:/etc/swarm-endpoints/
-    command: ["-storage.local.retention=2h", "-storage.local.memory-chunks=1048576", "-config.file=/etc/prometheus/prometheus.yaml"]
+    command: 
+      - -storage.local.retention=2h
+      - -storage.local.memory-chunks=1048576
+      - -config.file=/etc/prometheus/prometheus.yaml
     deploy:
       labels:
-       - prometheus.port=9090
-       - prometheus.endpoint=/metrics
-      placement:
-        constraints:
-          - node.role == manager
+        prometheus.enable: "true"
+        prometheus.port: "9090" # optional (defaults to prometheus defaults := "80")
+        prometheus.path: "/metrics" # optional (defaults to prometheus defaults := "/metrics")
     configs:
       - source: prometheus
         target: /etc/prometheus/prometheus.yaml
-
+  
 volumes:
   swarm-endpoints:
 
