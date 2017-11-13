@@ -4,87 +4,107 @@ This is a POC that demonstrates Prometheus service discovery in Docker Swarm. At
 
 ## How it works
 
-It is implemented as a standalone tool that writes the scrape targets to a file, that is then read by Prometheus. This uses the `<file_sd_config>` config
-directive available in Prometheus.
+It is implemented as a dual tool that scrapes task/services/node information from the docker daemon and serves a [`static_config`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#static_config) json. The client fetches and writes the scrape targets to a file, that is then read by Prometheus. This uses the [`<file_sd_config>`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#<file_sd_config>) config
+directive available in Prometheus. Eventually, the client may dissapear if prometheus supports fetching `static_config` from endpoints
 
-The discovery tool expects to have access to the Swarm API using `/var/run/docker.sock`. The provided `docker-compose.yaml`
-is configured to mount the `docker.sock` file inside the container, and this requires that the `swarm-discover` container
-is placed on the Swarm manager node.
+```txt
+Example deployment in a Swarm cluster
++------------------------+         +-----------------------+
+|                        |         |                       |
+| +--------------------+ |         | +-------------------+ |
+| |                    | |         | |                   | |
+| | Docker daemon      | |         | | Prometheus        | |
+| |                    | |         | |                   | |
+| +---------+----------+ |         | +---------+---------+ |
+|           ^ docker.sock|         |           ^ shared volume
+|           |            |         |           |           |
+| +---------+----------+ |  tick   | +---------+---------+ |
+| |                    <-------------+                   | |
+| | Discovery server   | |         | | Discovery client  | |
+| |                    +------------->                   | |
+| +--------------------+ | *.json  | +-------------------+ |
+|                        |         |                       |
++------------------------+         +-----------------------+
+|                Manager |         |                Worker |
++------------------------+         +-----------------------+
+```
 
-The discovery loop has 3 steps:
-* read the Swarm API and collect all the services (and their tasks) + the networks they are connected to
+The discovery server expects to have access to the Docker API. It's recommended that this access is done via `/var/run/docker.sock` without exposing the whole docker api endpoint outside the host. This implies that the server should be placed on the Swarm manager node.
+
+The discovery client expects to have access to a shared volume with prometheus, as using the [`<file_sd_config>`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#<file_sd_config>) directive implies writing files to an prometheus filesystem
+
+The discovery loop has several steps:
+* the client initiates a discovery process at a configurable interval by issuing a request to the discovery server, indicating the prometheus service that will be used to scrape metrics
+* The server reads the Docker Swarm API and collect all the services (and their tasks) + the networks they are connected to
+* match the networks with the prometheus service ones, to find an ip/route accessible to it to scrape metrics
+* serve a [`static_config`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#static_config) json to the client
 * write the scrape targets in the configuration file (`<file_sd_config>`)
-* connect the Prometheus container to all the networks that belong to the discovered services.
 
 The rest is done by Prometheus. Whenever the scrape target configuration file is updated, Prometheus re-reads it and loads the current scrape targets.
 
 ## Running it
-
-The only thing required to run Prometheus and the discovery tool is to launch a Swarm stack using the provided docker-compose.yaml
-file.
+See example in the provided docker-compose.yaml file.
 
 ```
-$ docker stack deploy -c docker-compose.yaml prometheus
+$ docker stack deploy -c docker-compose.yaml pro
 ```
 
-## Port discovery
+## Annotating the services
 
-By default, Prometheus will use port 80 to connect to a scrape target. But there are 2 ways in which a scrape target can have a different port configured:
-
-* have a port exposed in Docker. That way, the discovery tool can figure out on its own which port to configure for the scrape target.
-* annotate a service using Docker labels. A label with format `prometheus.port: <port_nr>` can be added to each service that requires a custom port configuration.
-
-As an example here is the following Docker Compose service definition that uses this feature:
-
+To be able to find the scrape targets, service labels should be used
 ```
 version: '3'
 
 services:
   front-end:
     image: weaveworksdemos/front-end
-    labels:
-        prometheus.port: 8079
+    deploy:
+      labels:
+        prometheus.enable: "true" # Scrape this service
+        prometheus.port: "9090" # optional (defaults to prometheus defaults := "80")
+        prometheus.path: "/metrics" # optional (defaults to prometheus defaults := "/metrics")
+        prometheus.job: "front-end" # prometheus job name. optional (defaults to service name in the stack eg: stack_front-end)
 ```
 
-## Metadata labels
+## labels
 
-The discovery tool attaches a set of metadata labels to each target that are available during the [relabeling phase](https://prometheus.io/docs/operating/configuration/#<relabel_config>) of the service discovery in Prometheus:
+The discovery tool attaches a set of labels to each target that are available during the [relabeling phase](https://prometheus.io/docs/operating/configuration/#<relabel_config>) of the service discovery in Prometheus:
 
-* `__meta_docker_service_label_<labelname>`: The value of this service label.
-* `__meta_docker_task_label_<labelname>`: The value of this task label.
-* `__meta_docker_task_name`: The name of the Docker task.
+* `__meta_swarm_label_<labelname>`: Labels for the service/tasks ex: `__meta_swarm_label_com_docker_stack_namespace=stack`
+* `__meta_swarm_task_name`: The name of the Docker task. ex: `stack_service.1`
+* `__meta_swarm_task_desired_state`: The state of the task. You can filter them in relabeling (see example). ex: `running`
+* `__meta_swarm_service_name`: The name of the Docker service. ex: `stack_service`
+* `__meta_swarm_node_hostname`: The hostname where the task is located. ex: `ip-172-31-8-170.ec2.internal`
+* `job`: As specified in the the label `prometheus.job`; the service name otherwhise ex: `stack_service`
 
 Labels starting with `__` are removed after the relabeling phase, so that these labels will not show up on time series directly.
 
-## Excluding services
-
-To exclude a specific service from being included in the scrape targets, add a label of format `prometheus.ignore: "true"`.
-
-Example Docker Compose service:
-
-```
-version: '3'
-
-services:
-  front-end:
-    image: weaveworksdemos/front-end
-    labels:
-        prometheus.ignore: "true"
-```
-
 ## Configuration options
 
-```
-$ ./prometheus-swarm discover --help
-Starts Swarm service discovery
+```sh
+$ prometheus-swarm-discovery server --help
+Starts Swarm service server
 
 Usage:
-  promswarm discover [flags]
+  prometheus-swarm-discovery server [flags]
 
 Flags:
-  -c, --clean               Disconnects unused networks from the Prometheus container, and deletes them. (default true)
+  -h, --help              help for server
+  -l, --loglevel string   Specify log level: debug, info, warn, error (default "info")
+```
+
+```sh
+$ prometheus-swarm-discovery client --help
+Starts Swarm service client
+
+Usage:
+  prometheus-swarm-discovery client [flags]
+
+Flags:
+  -h, --help                help for client
   -i, --interval int        The interval, in seconds, at which the discovery process is kicked off (default 30)
   -l, --loglevel string     Specify log level: debug, info, warn, error (default "info")
   -o, --output string       Output file that contains the Prometheus endpoints. (default "swarm-endpoints.json")
   -p, --prometheus string   Name of the Prometheus service (default "prometheus")
+  -s, --server string       The prometheus-swarm-discovery server to ask for targets (default "http://prometheus-swarm-discovery:8080")
 ```
