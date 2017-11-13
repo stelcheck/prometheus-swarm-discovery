@@ -11,12 +11,6 @@ scrape_configs:
       - source_labels: [__meta_swarm_task_desired_state]
         regex: running
         action: keep
-      # Remove the stack name from the job. ie, converts p_prometheus in prometheus
-      - source_labels: [job]
-        regex:        (.*?)_(.*)
-        target_label: job
-        replacement:  ${2}
-        action:       replace  
       # Add a task label
       - source_labels: [__meta_swarm_task_name]
         target_label: task

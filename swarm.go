@@ -212,13 +212,13 @@ func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
 
 func buildLabels(target scrapeTarget) map[string]string {
 
-	var jobLabel = target.Service.Spec.Name
+	var joblabel = target.Service.Spec.Name
 	if job, ok := target.Service.Spec.Labels[jobLabel]; ok {
-		jobLabel = job
+		joblabel = job
 	}
 
 	labels := map[string]string{
-		model.JobLabel: target.Service.Spec.Name,
+		model.JobLabel: joblabel,
 
 		model.MetaLabelPrefix + "swarm_task_name":          fmt.Sprintf("%s.%d", target.Service.Spec.Name, target.Task.Slot),
 		model.MetaLabelPrefix + "swarm_task_desired_state": string(target.Task.DesiredState),

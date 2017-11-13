@@ -2,7 +2,10 @@ version: '3.3'
 
 services:
   swarm-discovery-server:
-    image: jmendiara/prometheus-swarm-discovery
+    image: jmendiara/prometheus-swarm-discovery:0.1.2
+    command: 
+      - server
+      - l=debug
     ports:
       - '8080:8080'
     volumes:
@@ -13,13 +16,14 @@ services:
           - node.role == manager
 
   swarm-discovery-client:
-    image: jmendiara/prometheus-swarm-discovery
+    image: jmendiara/prometheus-swarm-discovery:0.1.2
     command: 
       - client
       - -i=5
       - -s=http://swarm-discovery-server:8080
       - -o=/swarm-endpoints/swarm-endpoints.json
       - -p=pro_prometheus
+      - -l=debug
     volumes:
       - swarm-endpoints:/swarm-endpoints/
 

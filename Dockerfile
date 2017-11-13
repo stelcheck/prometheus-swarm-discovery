@@ -15,6 +15,7 @@ LABEL maintainer="javier.mendiaracanardo@telefonica.com"
 
 COPY --from=build /go/bin/prometheus-swarm-discovery /prometheus-swarm-discovery
 
+ENV GIN_MODE release
 EXPOSE 8080
 
 ENTRYPOINT [ "/prometheus-swarm-discovery"]
