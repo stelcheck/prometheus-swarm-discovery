@@ -24,6 +24,7 @@ const (
 	enableLabel = "prometheus.enable"
 	portLabel   = "prometheus.port"
 	pathLabel   = "prometheus.path"
+	jobLabel    = "prometheus.job"
 )
 
 type scrapeTask struct {
@@ -210,6 +211,11 @@ func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
 }
 
 func buildLabels(target scrapeTarget) map[string]string {
+
+	var jobLabel = target.Service.Spec.Name
+	if job, ok := target.Service.Spec.Labels[jobLabel]; ok {
+		jobLabel = job
+	}
 
 	labels := map[string]string{
 		model.JobLabel: target.Service.Spec.Name,

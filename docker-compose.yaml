@@ -38,6 +38,7 @@ services:
         prometheus.enable: "true"
         prometheus.port: "9090" # optional (defaults to prometheus defaults := "80")
         prometheus.path: "/metrics" # optional (defaults to prometheus defaults := "/metrics")
+        prometheus.job: "prometheus" # optional (defaults to service name eg: pro_prometheus)
     configs:
       - source: prometheus
         target: /etc/prometheus/prometheus.yaml
