@@ -36,7 +36,6 @@ type scrapeTarget struct {
 	Node    swarm.Node
 	Service swarm.Service
 	Task    swarm.Task
-	Image   types.ImageInspect
 	IP      net.IP
 }
 
@@ -180,12 +179,6 @@ func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
 
 	for _, service := range prometheusEnabledServices {
 
-		image, _, err := cli.ImageInspectWithRaw(context.Background(), service.Spec.TaskTemplate.ContainerSpec.Image)
-		if err != nil {
-			logger.Error(err)
-			continue
-		}
-
 		tasks, err := findServiceTasks(cli, service.ID)
 		if err != nil {
 			logger.Error(err)
@@ -200,7 +193,6 @@ func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
 				Node:    nodes[connectedTask.task.NodeID],
 				Service: service,
 				Task:    connectedTask.task,
-				Image:   image,
 				IP:      connectedTask.ip,
 			}
 			scrapeTargets = append(scrapeTargets, target)
@@ -230,10 +222,6 @@ func buildLabels(target scrapeTarget) map[string]string {
 
 	if path, ok := target.Service.Spec.Labels[pathLabel]; ok {
 		labels[model.MetricsPathLabel] = path
-	}
-
-	for k, v := range target.Image.ContainerConfig.Labels {
-		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"swarm_label_"+k)] = v
 	}
 
 	for k, v := range target.Service.Spec.Labels {
