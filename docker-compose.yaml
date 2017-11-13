@@ -22,14 +22,6 @@ services:
       - -p=pro_prometheus
     volumes:
       - swarm-endpoints:/swarm-endpoints/
-    deploy:
-      labels:
-        prometheus.enable: "true"
-        prometheus.port: "9090" # optional (defaults to prometheus defaults := "80")
-        prometheus.path: "/metrics" # optional (defaults to prometheus defaults := "/metrics")
-      placement:
-        constraints:
-          - node.role == manager
 
   prometheus:
     image: prom/prometheus:v1.8.2
