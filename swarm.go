@@ -59,31 +59,8 @@ type ClientOptions struct {
 }
 
 var logger = logrus.New()
-var serverOptions = ServerOptions{}
-var clientOptions = ClientOptions{}
-
-// finds the first task running the prometheus container
-func findPrometheusContainer(serviceName string) (string, error) {
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		return "", err
-	}
-
-	taskFilters := filters.NewArgs()
-	taskFilters.Add("desired-state", string(swarm.TaskStateRunning))
-	taskFilters.Add("service", serviceName)
-
-	promTasks, err := cli.TaskList(context.Background(), types.TaskListOptions{Filters: taskFilters})
-	if err != nil {
-		return "", err
-	}
-
-	if len(promTasks) == 0 || promTasks[0].Status.ContainerStatus.ContainerID == "" {
-		return "", fmt.Errorf("Could not find container for service %s", serviceName)
-	}
-
-	return promTasks[0].Status.ContainerStatus.ContainerID, nil
-}
+var discoveryServerOptions = ServerOptions{}
+var discoveryClientOptions = ClientOptions{}
 
 // finds a service by name
 func findServiceByName(cli *client.Client, serviceName string) (swarm.Service, error) {
@@ -151,12 +128,7 @@ func getNetworkIDsMap(service swarm.Service) map[string]bool {
 	return networkIDs
 }
 
-func getScrapeTargets(prometheusServiceName string) ([]scrapeTarget, error) {
-
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		return nil, err
-	}
+func getScrapeTargets(cli *client.Client, prometheusServiceName string) ([]scrapeTarget, error) {
 
 	prometheusService, err := findServiceByName(cli, prometheusServiceName)
 	if err != nil {
@@ -261,9 +233,9 @@ func buildScrapeTasks(scrapeTargets []scrapeTarget) []scrapeTask {
 	return tasks
 }
 
-func discoverSwarm(prometheusServiceName string) ([]scrapeTask, error) {
+func discoverSwarm(cli *client.Client, prometheusServiceName string) ([]scrapeTask, error) {
 
-	scrapeTargetsMap, err := getScrapeTargets(prometheusServiceName)
+	scrapeTargetsMap, err := getScrapeTargets(cli, prometheusServiceName)
 	if err != nil {
 		return nil, err
 	}
@@ -334,34 +306,69 @@ func writeSDConfig(scrapeTasks []scrapeTask, output string) {
 
 func discoveryServer(cmd *cobra.Command, args []string) {
 
-	level, err := logrus.ParseLevel(serverOptions.logLevel)
+	level, err := logrus.ParseLevel(discoveryServerOptions.logLevel)
 	if err != nil {
-		logger.Fatal(err)
+		logger.Fatal("error when setting log level: ", err)
+		return
 	}
-	logger.Level = level
+
+	logrus.SetLevel(level)
+
+	cli, err := client.NewEnvClient()
+	if err != nil {
+		logger.Fatal("error when creating docker client: ", err)
+		return
+	}
+
+	if _, err := cli.Ping(context.TODO()); err != nil {
+		logger.Fatal("error when using docker client: ", err)
+		return
+	}
 
 	r := gin.Default()
+
 	r.GET("/targets/:prometheusService", func(c *gin.Context) {
+
 		prometheusService := c.Param("prometheusService")
-		scrapeTasks, err := discoverSwarm(prometheusService)
+		scrapeTasks, err := discoverSwarm(cli, prometheusService)
+
 		if err != nil {
 			logger.Error(err)
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.JSON(200, scrapeTasks)
+		c.JSON(http.StatusOK, scrapeTasks)
+
 	})
+
 	r.GET("/debug/:prometheusService", func(c *gin.Context) {
+
 		prometheusService := c.Param("prometheusService")
-		scrapeTasks, err := getScrapeTargets(prometheusService)
+		scrapeTasks, err := getScrapeTargets(cli, prometheusService)
+
 		if err != nil {
 			logger.Error(err)
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.JSON(200, scrapeTasks)
+		c.JSON(http.StatusOK, scrapeTasks)
+
+	})
+
+	r.GET("/_health", func(c *gin.Context) {
+
+		result, err := cli.Ping(context.TODO())
+
+		if err != nil {
+			logger.Error(err)
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+
+		c.JSON(http.StatusOK, result)
+
 	})
 
 	r.Run() // listen and serve on 0.0.0.0:8080
@@ -384,7 +391,7 @@ func getServerTargets(serverClient *http.Client, serverURL string, prometheusSer
 func discoveryClient(cmd *cobra.Command, args []string) {
 	var serverClient = &http.Client{Timeout: 10 * time.Second}
 
-	level, err := logrus.ParseLevel(clientOptions.logLevel)
+	level, err := logrus.ParseLevel(discoveryClientOptions.logLevel)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -392,14 +399,14 @@ func discoveryClient(cmd *cobra.Command, args []string) {
 
 	for {
 		targets := make([]scrapeTask, 0)
-		err := getServerTargets(serverClient, clientOptions.serverURL, clientOptions.prometheusService, &targets)
+		err := getServerTargets(serverClient, discoveryClientOptions.serverURL, discoveryClientOptions.prometheusService, &targets)
 		if err != nil {
 			logger.Error(err)
 			return
 		}
 
-		writeSDConfig(targets, clientOptions.output)
-		time.Sleep(time.Duration(clientOptions.interval) * time.Second)
+		writeSDConfig(targets, discoveryClientOptions.output)
+		time.Sleep(time.Duration(discoveryClientOptions.interval) * time.Second)
 	}
 }
 
@@ -412,7 +419,7 @@ func main() {
 		Short: "Starts Swarm service server",
 		Run:   discoveryServer,
 	}
-	cmdServer.Flags().StringVarP(&serverOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
+	cmdServer.Flags().StringVarP(&discoveryServerOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
 	rootCmd.AddCommand(cmdServer)
 
 	var cmdClient = &cobra.Command{
@@ -420,11 +427,11 @@ func main() {
 		Short: "Starts Swarm service client",
 		Run:   discoveryClient,
 	}
-	cmdClient.Flags().StringVarP(&clientOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
-	cmdClient.Flags().StringVarP(&clientOptions.serverURL, "server", "s", "http://prometheus-swarm-discovery:8080", "The prometheus-swarm-discovery server to ask for targets")
-	cmdClient.Flags().StringVarP(&clientOptions.prometheusService, "prometheus", "p", "prometheus", "Name of the Prometheus service")
-	cmdClient.Flags().StringVarP(&clientOptions.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
-	cmdClient.Flags().IntVarP(&clientOptions.interval, "interval", "i", 30, "The interval, in seconds, at which the discovery process is kicked off")
+	cmdClient.Flags().StringVarP(&discoveryClientOptions.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
+	cmdClient.Flags().StringVarP(&discoveryClientOptions.serverURL, "server", "s", "http://prometheus-swarm-discovery:8080", "The prometheus-swarm-discovery server to ask for targets")
+	cmdClient.Flags().StringVarP(&discoveryClientOptions.prometheusService, "prometheus", "p", "prometheus", "Name of the Prometheus service")
+	cmdClient.Flags().StringVarP(&discoveryClientOptions.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
+	cmdClient.Flags().IntVarP(&discoveryClientOptions.interval, "interval", "i", 30, "The interval, in seconds, at which the discovery process is kicked off")
 	rootCmd.AddCommand(cmdClient)
 
 	rootCmd.Execute()
