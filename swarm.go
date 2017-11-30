@@ -329,7 +329,7 @@ func discoveryServer(cmd *cobra.Command, args []string) {
 
 		if err != nil {
 			logger.Error(err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -344,7 +344,7 @@ func discoveryServer(cmd *cobra.Command, args []string) {
 
 		if err != nil {
 			logger.Error(err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
