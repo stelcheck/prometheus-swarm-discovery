@@ -320,6 +320,11 @@ func discoveryServer(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	if _, err := cli.Ping(context.TODO()); err != nil {
+		logger.Fatal("error when using docker client: ", err)
+		return
+	}
+
 	r := gin.Default()
 
 	r.GET("/targets/:prometheusService", func(c *gin.Context) {
