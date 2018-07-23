@@ -239,7 +239,7 @@ func taskLabels(task swarm.Task, serviceIDMap map[string]swarm.Service) map[stri
 	return labels
 }
 
-func discoverSwarm(prometheusContainerID string, outputFile string, discoveryType string) {
+func discoverSwarm(prometheusContainerID string, outputFile string) {
 	cli, err := client.NewEnvClient()
 	if err != nil {
 		panic(err)
@@ -309,16 +309,11 @@ func discoverSwarm(prometheusContainerID string, outputFile string, discoveryTyp
 }
 
 func discoveryProcess(cmd *cobra.Command, args []string) {
-
 	level, err := logrus.ParseLevel(options.logLevel)
 	if err != nil {
 		logger.Fatal(err)
 	}
 	logger.Level = level
-
-	if options.discovery != implicit && options.discovery != explicit {
-		logger.Fatal("Invalid discovery type: ", options.discovery)
-	}
 
 	logger.Info("Starting service discovery process using Prometheus service [", options.prometheusService, "]")
 
@@ -330,7 +325,7 @@ func discoveryProcess(cmd *cobra.Command, args []string) {
 			continue
 		}
 
-		discoverSwarm(prometheusContainerID, options.output, options.discovery)
+		discoverSwarm(prometheusContainerID, options.output)
 		if options.clean {
 			cleanNetworks(prometheusContainerID)
 		}
@@ -341,7 +336,6 @@ func discoveryProcess(cmd *cobra.Command, args []string) {
 type Options struct {
 	prometheusService string
 	discoveryInterval int
-	discovery         string
 	logLevel          string
 	output            string
 	clean             bool
