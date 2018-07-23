@@ -1,6 +1,10 @@
 # Prometheus-Swarm service discovery
 
-This is a POC that demonstrates Prometheus service discovery in Docker Swarm. At the moment, this POC only discovers Swarm services and their respective tasks, without attempting to discover nodes or other Swarm concepts.
+This is a for of https://github.com/ContainerSolutions/prometheus-swarm-discovery which aims at providing a
+viable long-term discovery service solution.
+
+This fork includes commits from numerous other forks, as well
+as additional code and alterations made by its maintainer.
 
 ## How it works
 
@@ -12,9 +16,10 @@ is configured to mount the `docker.sock` file inside the container, and this req
 is placed on the Swarm manager node.
 
 The discovery loop has 3 steps:
-* read the Swarm API and collect all the services (and their tasks) + the networks they are connected to
-* write the scrape targets in the configuration file (`<file_sd_config>`)
-* connect the Prometheus container to all the networks that belong to the discovered services.
+
+- read the Swarm API and collect all the services (and their tasks) + the networks they are connected to
+- write the scrape targets in the configuration file (`<file_sd_config>`)
+- connect the Prometheus container to all the networks that belong to the discovered services.
 
 The rest is done by Prometheus. Whenever the scrape target configuration file is updated, Prometheus re-reads it and loads the current scrape targets.
 
@@ -23,46 +28,52 @@ The rest is done by Prometheus. Whenever the scrape target configuration file is
 The only thing required to run Prometheus and the discovery tool is to launch a Swarm stack using the provided docker-compose.yaml
 file.
 
-```
-$ docker stack deploy -c docker-compose.yaml prometheus
+```shell
+docker stack deploy -c docker-compose.yaml prometheus
 ```
 
 ## Port discovery
 
 By default, Prometheus will use port 80 to connect to a scrape target. But there are 2 ways in which a scrape target can have a different port configured:
 
-* have a port exposed in Docker. That way, the discovery tool can figure out on its own which port to configure for the scrape target.
-* annotate a service using Docker labels. A label with format `prometheus.port: <port_nr>` can be added to each service that requires a custom port configuration.
+- have a port exposed in Docker. That way, the discovery tool can figure out on its own which port to configure for the scrape target.
+- annotate a service using Docker labels. A label with format `prometheus.port: <port_nr>` can be added to each service that requires a custom port configuration.
 
 As an example here is the following Docker Compose service definition that uses this feature:
 
-```
+```yaml
 version: '3'
 
 services:
   front-end:
     image: weaveworksdemos/front-end
     labels:
-        prometheus.port: 8079
+      prometheus:scan: true
+      prometheus.port: 8079
 ```
 
 ## Metadata labels
 
 The discovery tool attaches a set of metadata labels to each target that are available during the [relabeling phase](https://prometheus.io/docs/operating/configuration/#<relabel_config>) of the service discovery in Prometheus:
 
-* `__meta_docker_service_label_<labelname>`: The value of this service label.
-* `__meta_docker_task_label_<labelname>`: The value of this task label.
-* `__meta_docker_task_name`: The name of the Docker task.
+- `__meta_docker_service_label_<labelname>`: The value of this service label.
+- `__meta_docker_task_label_<labelname>`: The value of this task label.
+- `__meta_docker_task_name`: The name of the Docker task.
 
 Labels starting with `__` are removed after the relabeling phase, so that these labels will not show up on time series directly.
 
 ## Excluding services
 
+By default, only services labeled `prometheus.scan: true` will be
+scanned. However, you may also run the discovery service with the
+`--discovery implicit` flag and instead exclude services you wish to
+ignore.
+
 To exclude a specific service from being included in the scrape targets, add a label of format `prometheus.ignore: "true"`.
 
 Example Docker Compose service:
 
-```
+```yaml
 version: '3'
 
 services:
@@ -74,7 +85,7 @@ services:
 
 ## Configuration options
 
-```
+```shell
 $ ./prometheus-swarm discover --help
 Starts Swarm service discovery
 
@@ -87,4 +98,5 @@ Flags:
   -l, --loglevel string     Specify log level: debug, info, warn, error (default "info")
   -o, --output string       Output file that contains the Prometheus endpoints. (default "swarm-endpoints.json")
   -p, --prometheus string   Name of the Prometheus service (default "prometheus")
+  -d  --discovery string    Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.scan (default "explicit")
 ```
