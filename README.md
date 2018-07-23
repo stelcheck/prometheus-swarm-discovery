@@ -48,7 +48,7 @@ services:
   front-end:
     image: weaveworksdemos/front-end
     labels:
-      prometheus:scan: true
+      prometheus.enable: true
       prometheus.port: 8079
 ```
 
@@ -98,5 +98,5 @@ Flags:
   -l, --loglevel string     Specify log level: debug, info, warn, error (default "info")
   -o, --output string       Output file that contains the Prometheus endpoints. (default "swarm-endpoints.json")
   -p, --prometheus string   Name of the Prometheus service (default "prometheus")
-  -d  --discovery string    Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.scan (default "explicit")
+  -d  --discovery string    Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.enable (default "explicit")
 ```

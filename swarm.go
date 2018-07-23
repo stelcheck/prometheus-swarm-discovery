@@ -25,7 +25,8 @@ const (
 	implicit     = "implicit"
 	explicit     = "explicit"
 	portLabel    = "prometheus.port"
-	includeLabel = "prometheus.scan"
+	pathLabel    = "prometheus.path"
+	includeLabel = "prometheus.enable"
 	excludeLabel = "prometheus.ignore"
 )
 
@@ -359,7 +360,7 @@ func main() {
 	cmdDiscover.Flags().StringVarP(&options.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
 	cmdDiscover.Flags().StringVarP(&options.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
 	cmdDiscover.Flags().BoolVarP(&options.clean, "clean", "c", true, "Disconnects unused networks from the Prometheus container, and deletes them.")
-	cmdDiscover.Flags().StringVarP(&options.discovery, "discovery", "d", "explicit", "Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.scan")
+	cmdDiscover.Flags().StringVarP(&options.discovery, "discovery", "d", "explicit", "Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.enabled")
 
 	var rootCmd = &cobra.Command{Use: "promswarm"}
 	rootCmd.AddCommand(cmdDiscover)
