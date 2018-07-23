@@ -216,18 +216,27 @@ func collectIPs(task swarm.Task) ([]net.IP, map[string]swarm.Network) {
 
 func taskLabels(task swarm.Task, serviceIDMap map[string]swarm.Service) map[string]string {
 	service := serviceIDMap[task.ServiceID]
+
 	labels := map[string]string{
 		model.JobLabel: service.Spec.Name,
 
 		model.MetaLabelPrefix + "docker_task_name":          task.Name,
 		model.MetaLabelPrefix + "docker_task_desired_state": string(task.DesiredState),
 	}
+
+	// Add path
+	if path, ok := service.Spec.Labels[pathLabel]; ok {
+		labels[model.MetricsPathLabel] = path
+	}
+
+	// Sanitize other labels
 	for k, v := range task.Labels {
 		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"docker_task_label_"+k)] = v
 	}
 	for k, v := range service.Spec.Labels {
 		labels[strutil.SanitizeLabelName(model.MetaLabelPrefix+"docker_service_label_"+k)] = v
 	}
+
 	return labels
 }
 
