@@ -27,7 +27,6 @@ const (
 	portLabel    = "prometheus.port"
 	pathLabel    = "prometheus.path"
 	includeLabel = "prometheus.enable"
-	excludeLabel = "prometheus.ignore"
 )
 
 var logger = logrus.New()
@@ -266,18 +265,10 @@ func discoverSwarm(prometheusContainerID string, outputFile string, discoveryTyp
 	allNetworks := make(map[string]swarm.Network)
 
 	for _, task := range tasks {
-
-		if discoveryType == implicit {
-			if _, ok := task.Spec.ContainerSpec.Labels[excludeLabel]; ok {
-				logger.Debugf("Task %s ignored by Prometheus", task.ID)
-				continue
-			}
-		} else if discoveryType == explicit {
-			if _, ok := task.Spec.ContainerSpec.Labels[includeLabel]; ok {
-				logger.Debugf("Task %s should be scanned by Prometheus", task.ID)
-			} else {
-				continue
-			}
+		if _, ok := task.Spec.ContainerSpec.Labels[includeLabel]; ok {
+			logger.Debugf("Task %s should be scanned by Prometheus", task.ID)
+		} else {
+			continue
 		}
 
 		ports := collectPorts(task, serviceIDMap)
@@ -369,7 +360,6 @@ func main() {
 	cmdDiscover.Flags().StringVarP(&options.logLevel, "loglevel", "l", "info", "Specify log level: debug, info, warn, error")
 	cmdDiscover.Flags().StringVarP(&options.output, "output", "o", "swarm-endpoints.json", "Output file that contains the Prometheus endpoints.")
 	cmdDiscover.Flags().BoolVarP(&options.clean, "clean", "c", true, "Disconnects unused networks from the Prometheus container, and deletes them.")
-	cmdDiscover.Flags().StringVarP(&options.discovery, "discovery", "d", "explicit", "Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.enabled")
 
 	var rootCmd = &cobra.Command{Use: "promswarm"}
 	rootCmd.AddCommand(cmdDiscover)

@@ -62,27 +62,6 @@ The discovery tool attaches a set of metadata labels to each target that are ava
 
 Labels starting with `__` are removed after the relabeling phase, so that these labels will not show up on time series directly.
 
-## Excluding services
-
-By default, only services labeled `prometheus.scan: true` will be
-scanned. However, you may also run the discovery service with the
-`--discovery implicit` flag and instead exclude services you wish to
-ignore.
-
-To exclude a specific service from being included in the scrape targets, add a label of format `prometheus.ignore: "true"`.
-
-Example Docker Compose service:
-
-```yaml
-version: '3'
-
-services:
-  front-end:
-    image: weaveworksdemos/front-end
-    labels:
-        prometheus.ignore: "true"
-```
-
 ## Configuration options
 
 ```shell
@@ -98,5 +77,4 @@ Flags:
   -l, --loglevel string     Specify log level: debug, info, warn, error (default "info")
   -o, --output string       Output file that contains the Prometheus endpoints. (default "swarm-endpoints.json")
   -p, --prometheus string   Name of the Prometheus service (default "prometheus")
-  -d  --discovery string    Discovery method. (implicit: scans all, explicit: scan only services labled prometheus.enable (default "explicit")
 ```
