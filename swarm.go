@@ -53,12 +53,7 @@ func writeSDConfig(scrapeTasks []scrapeTask, output string) {
 	}
 }
 
-func findPrometheusContainer(serviceName string) (*swarm.Task, error) {
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		panic(err)
-	}
-
+func findPrometheusContainer(cli *client.Client, serviceName string) (*swarm.Task, error) {
 	taskFilters := filters.NewArgs()
 	taskFilters.Add("desired-state", string(swarm.TaskStateRunning))
 	taskFilters.Add("service", serviceName)
@@ -155,12 +150,7 @@ func taskLabels(task swarm.Task, service swarm.Service) map[string]string {
 	return labels
 }
 
-func discoverSwarm(prometheusTask *swarm.Task, outputFile string) {
-	cli, err := client.NewEnvClient()
-	if err != nil {
-		panic(err)
-	}
-
+func discoverSwarm(cli *client.Client, prometheusTask *swarm.Task, outputFile string) {
 	// Find all labeled services
 	serviceFilters := filters.NewArgs()
 	serviceFilters.Add("label", includeLabel+"=true")
@@ -222,22 +212,28 @@ func discoverSwarm(prometheusTask *swarm.Task, outputFile string) {
 
 func discoveryProcess(cmd *cobra.Command, args []string) {
 	level, err := logrus.ParseLevel(options.logLevel)
+
 	if err != nil {
 		logger.Fatal(err)
 	}
-	logger.Level = level
 
+	logger.Level = level
 	logger.Info("Starting service discovery process using Prometheus service [", options.prometheusService, "]")
+
+	cli, err := client.NewEnvClient()
+	if err != nil {
+		panic(err)
+	}
 
 	for {
 		time.Sleep(time.Duration(options.discoveryInterval) * time.Second)
-		prometheusContainer, err := findPrometheusContainer(options.prometheusService)
+		prometheusContainer, err := findPrometheusContainer(cli, options.prometheusService)
 		if err != nil {
 			logger.Warn(err)
 			continue
 		}
 
-		discoverSwarm(prometheusContainer, options.output)
+		discoverSwarm(cli, prometheusContainer, options.output)
 	}
 }
 
